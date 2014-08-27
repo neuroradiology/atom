@@ -60,6 +60,9 @@ class Pane extends Model
   # Called by the view layer to construct a view for this model.
   getViewClass: -> PaneView ?= require './pane-view'
 
+  onDidActivate: (fn) ->
+    @emitter.on 'did-activate', fn
+
   onDidAddItem: (fn) ->
     @emitter.on 'did-add-item', fn
 
@@ -89,6 +92,7 @@ class Pane extends Model
   activate: ->
     @container?.activePane = this
     @emit 'activated'
+    @emitter.emit 'did-activate'
 
   getPanes: -> [this]
 
