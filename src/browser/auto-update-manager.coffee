@@ -1,96 +1,140 @@
-https = require 'https'
-autoUpdater = require 'auto-updater'
-dialog = require 'dialog'
+autoUpdater = null
 _ = require 'underscore-plus'
+Config = require '../config'
 {EventEmitter} = require 'events'
+path = require 'path'
 
-IDLE_STATE='idle'
-CHECKING_STATE='checking'
-DOWNLOADING_STATE='downloading'
-UPDATE_AVAILABLE_STATE='update-available'
-NO_UPDATE_AVAILABLE_STATE='no-update-available'
-ERROR_STATE='error'
+IdleState = 'idle'
+CheckingState = 'checking'
+DownladingState = 'downloading'
+UpdateAvailableState = 'update-available'
+NoUpdateAvailableState = 'no-update-available'
+UnsupportedState = 'unsupported'
+ErrorState = 'error'
 
 module.exports =
 class AutoUpdateManager
   _.extend @prototype, EventEmitter.prototype
 
-  constructor: (@version) ->
-    @state = IDLE_STATE
+  constructor: (@version, @testMode, resourcePath) ->
+    @state = IdleState
+    @iconPath = path.resolve(__dirname, '..', '..', 'resources', 'atom.png')
     @feedUrl = "https://atom.io/api/updates?version=#{@version}"
+    @config = new Config({configDirPath: process.env.ATOM_HOME, resourcePath, enablePersistence: true})
+    @config.setSchema null, {type: 'object', properties: _.clone(require('../config-schema'))}
+    @config.load()
+    process.nextTick => @setupAutoUpdater()
 
+  setupAutoUpdater: ->
     if process.platform is 'win32'
-      autoUpdater.checkForUpdates = => @checkForUpdatesShim()
-
-    autoUpdater.setFeedUrl @feedUrl
-
-    autoUpdater.on 'checking-for-update', =>
-      @setState(CHECKING_STATE)
-
-    autoUpdater.on 'update-not-available', =>
-      @setState(NO_UPDATE_AVAILABLE_STATE)
-
-    autoUpdater.on 'update-available', =>
-      @setState(DOWNLOADING_STATE)
+      autoUpdater = require './auto-updater-win32'
+    else
+      {autoUpdater} = require 'electron'
 
     autoUpdater.on 'error', (event, message) =>
-      @setState(ERROR_STATE)
+      @setState(ErrorState)
       console.error "Error Downloading Update: #{message}"
 
-    autoUpdater.on 'update-downloaded', (event, @releaseNotes, @releaseVersion) =>
-      @setState(UPDATE_AVAILABLE_STATE)
-      @emitUpdateAvailableEvent(@getWindows()...)
+    autoUpdater.setFeedURL @feedUrl
 
-    # Only released versions should check for updates.
-    unless /\w{7}/.test(@version)
-      @check(hidePopups: true)
+    autoUpdater.on 'checking-for-update', =>
+      @setState(CheckingState)
+      @emitWindowEvent('checking-for-update')
 
-  # Windows doesn't have an auto-updater, so use this method to shim the events.
-  checkForUpdatesShim: ->
-    autoUpdater.emit 'checking-for-update'
-    request = https.get @feedUrl, (response) ->
-      if response.statusCode == 200
-        body = ""
-        response.on 'data', (chunk) -> body += chunk
-        response.on 'end', ->
-          {notes, name} = JSON.parse(body)
-          autoUpdater.emit 'update-downloaded', null, notes, name
+    autoUpdater.on 'update-not-available', =>
+      @setState(NoUpdateAvailableState)
+      @emitWindowEvent('update-not-available')
+
+    autoUpdater.on 'update-available', =>
+      @setState(DownladingState)
+      # We use sendMessage to send an event called 'update-available' in 'update-downloaded'
+      # once the update download is complete. This mismatch between the electron
+      # autoUpdater events is unfortunate but in the interest of not changing the
+      # one existing event handled by applicationDelegate
+      @emitWindowEvent('did-begin-downloading-update')
+      @emit('did-begin-download')
+
+    autoUpdater.on 'update-downloaded', (event, releaseNotes, @releaseVersion) =>
+      @setState(UpdateAvailableState)
+      @emitUpdateAvailableEvent()
+
+    @config.onDidChange 'core.automaticallyUpdate', ({newValue}) =>
+      if newValue
+        @scheduleUpdateCheck()
       else
-        autoUpdater.emit 'update-not-available'
+        @cancelScheduledUpdateCheck()
 
-    request.on 'error', (error) ->
-      autoUpdater.emit 'error', null, error.message
+    @scheduleUpdateCheck() if @config.get 'core.automaticallyUpdate'
 
-  emitUpdateAvailableEvent: (windows...) ->
-    return unless @releaseVersion? and @releaseNotes
-    for atomWindow in windows
-      atomWindow.sendCommand('window:update-available', [@releaseVersion, @releaseNotes])
+    switch process.platform
+      when 'win32'
+        @setState(UnsupportedState) unless autoUpdater.supportsUpdates()
+      when 'linux'
+        @setState(UnsupportedState)
+
+  emitUpdateAvailableEvent: ->
+    return unless @releaseVersion?
+    @emitWindowEvent('update-available', {@releaseVersion})
+    return
+
+  emitWindowEvent: (eventName, payload) ->
+    for atomWindow in @getWindows()
+      atomWindow.sendMessage(eventName, payload)
+    return
 
   setState: (state) ->
-    return unless @state != state
+    return if @state is state
     @state = state
     @emit 'state-changed', @state
 
   getState: ->
     @state
 
+  scheduleUpdateCheck: ->
+    # Only schedule update check periodically if running in release version and
+    # and there is no existing scheduled update check.
+    unless /\w{7}/.test(@version) or @checkForUpdatesIntervalID
+      checkForUpdates = => @check(hidePopups: true)
+      fourHours = 1000 * 60 * 60 * 4
+      @checkForUpdatesIntervalID = setInterval(checkForUpdates, fourHours)
+      checkForUpdates()
+
+  cancelScheduledUpdateCheck: ->
+    if @checkForUpdatesIntervalID
+      clearInterval(@checkForUpdatesIntervalID)
+      @checkForUpdatesIntervalID = null
+
   check: ({hidePopups}={}) ->
     unless hidePopups
       autoUpdater.once 'update-not-available', @onUpdateNotAvailable
       autoUpdater.once 'error', @onUpdateError
 
-    autoUpdater.checkForUpdates()
+    autoUpdater.checkForUpdates() unless @testMode
 
   install: ->
-    autoUpdater.quitAndInstall()
+    autoUpdater.quitAndInstall() unless @testMode
 
   onUpdateNotAvailable: =>
     autoUpdater.removeListener 'error', @onUpdateError
-    dialog.showMessageBox type: 'info', buttons: ['OK'], message: 'No update available.', detail: "Version #{@version} is the latest version."
+    {dialog} = require 'electron'
+    dialog.showMessageBox
+      type: 'info'
+      buttons: ['OK']
+      icon: @iconPath
+      message: 'No update available.'
+      title: 'No Update Available'
+      detail: "Version #{@version} is the latest version."
 
   onUpdateError: (event, message) =>
     autoUpdater.removeListener 'update-not-available', @onUpdateNotAvailable
-    dialog.showMessageBox type: 'warning', buttons: ['OK'], message: 'There was an error checking for updates.', detail: message
+    {dialog} = require 'electron'
+    dialog.showMessageBox
+      type: 'warning'
+      buttons: ['OK']
+      icon: @iconPath
+      message: 'There was an error checking for updates.'
+      title: 'Update Error'
+      detail: message
 
   getWindows: ->
     global.atomApplication.windows

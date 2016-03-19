@@ -1,8 +1,9 @@
 temp = require 'temp'
-Git = require '../src/git'
+GitRepository = require '../src/git-repository'
 fs = require 'fs-plus'
 path = require 'path'
 Task = require '../src/task'
+Project = require '../src/project'
 
 copyRepository = ->
   workingDirPath = temp.mkdirSync('atom-working-dir')
@@ -10,7 +11,7 @@ copyRepository = ->
   fs.renameSync(path.join(workingDirPath, 'git.git'), path.join(workingDirPath, '.git'))
   workingDirPath
 
-describe "Git", ->
+describe "GitRepository", ->
   repo = null
 
   beforeEach ->
@@ -22,28 +23,38 @@ describe "Git", ->
 
   describe "@open(path)", ->
     it "returns null when no repository is found", ->
-      expect(Git.open(path.join(temp.dir, 'nogit.txt'))).toBeNull()
+      expect(GitRepository.open(path.join(temp.dir, 'nogit.txt'))).toBeNull()
 
-  describe "new Git(path)", ->
+  describe ".async", ->
+    it "returns a GitRepositoryAsync for the same repo", ->
+      repoPath = path.join(__dirname, 'fixtures', 'git', 'master.git')
+      repo = new GitRepository(repoPath)
+      onSuccess = jasmine.createSpy('onSuccess')
+      waitsForPromise ->
+        repo.async.getPath().then(onSuccess)
+      runs ->
+        expect(onSuccess.mostRecentCall.args[0]).toBe(repoPath)
+
+  describe "new GitRepository(path)", ->
     it "throws an exception when no repository is found", ->
-      expect(-> new Git(path.join(temp.dir, 'nogit.txt'))).toThrow()
+      expect(-> new GitRepository(path.join(temp.dir, 'nogit.txt'))).toThrow()
 
   describe ".getPath()", ->
     it "returns the repository path for a .git directory path", ->
-      repo = new Git(path.join(__dirname, 'fixtures', 'git', 'master.git', 'HEAD'))
+      repo = new GitRepository(path.join(__dirname, 'fixtures', 'git', 'master.git', 'HEAD'))
       expect(repo.getPath()).toBe path.join(__dirname, 'fixtures', 'git', 'master.git')
 
     it "returns the repository path for a repository path", ->
-      repo = new Git(path.join(__dirname, 'fixtures', 'git', 'master.git'))
+      repo = new GitRepository(path.join(__dirname, 'fixtures', 'git', 'master.git'))
       expect(repo.getPath()).toBe path.join(__dirname, 'fixtures', 'git', 'master.git')
 
   describe ".isPathIgnored(path)", ->
     it "returns true for an ignored path", ->
-      repo = new Git(path.join(__dirname, 'fixtures', 'git', 'ignore.git'))
+      repo = new GitRepository(path.join(__dirname, 'fixtures', 'git', 'ignore.git'))
       expect(repo.isPathIgnored('a.txt')).toBeTruthy()
 
     it "returns false for a non-ignored path", ->
-      repo = new Git(path.join(__dirname, 'fixtures', 'git', 'ignore.git'))
+      repo = new GitRepository(path.join(__dirname, 'fixtures', 'git', 'ignore.git'))
       expect(repo.isPathIgnored('b.txt')).toBeFalsy()
 
   describe ".isPathModified(path)", ->
@@ -51,7 +62,7 @@ describe "Git", ->
 
     beforeEach ->
       workingDirPath = copyRepository()
-      repo = new Git(workingDirPath)
+      repo = new GitRepository(workingDirPath)
       filePath = path.join(workingDirPath, 'a.txt')
       newPath = path.join(workingDirPath, 'new-path.txt')
 
@@ -75,7 +86,7 @@ describe "Git", ->
 
     beforeEach ->
       workingDirPath = copyRepository()
-      repo = new Git(workingDirPath)
+      repo = new GitRepository(workingDirPath)
       filePath = path.join(workingDirPath, 'a.txt')
       newPath = path.join(workingDirPath, 'new-path.txt')
       fs.writeFileSync(newPath, "i'm new here")
@@ -92,7 +103,7 @@ describe "Git", ->
 
     beforeEach ->
       workingDirPath = copyRepository()
-      repo = new Git(workingDirPath)
+      repo = new GitRepository(workingDirPath)
       filePath = path.join(workingDirPath, 'a.txt')
 
     it "no longer reports a path as modified after checkout", ->
@@ -111,10 +122,10 @@ describe "Git", ->
       fs.writeFileSync(filePath, 'ch ch changes')
       repo.getPathStatus(filePath)
       statusHandler = jasmine.createSpy('statusHandler')
-      repo.on 'status-changed', statusHandler
+      repo.onDidChangeStatus statusHandler
       repo.checkoutHead(filePath)
       expect(statusHandler.callCount).toBe 1
-      expect(statusHandler.argsForCall[0][0..1]).toEqual [filePath, 0]
+      expect(statusHandler.argsForCall[0][0]).toEqual {path: filePath, pathStatus: 0}
 
       repo.checkoutHead(filePath)
       expect(statusHandler.callCount).toBe 1
@@ -123,8 +134,10 @@ describe "Git", ->
     [filePath, editor] = []
 
     beforeEach ->
+      spyOn(atom, "confirm")
+
       workingDirPath = copyRepository()
-      repo = new Git(workingDirPath)
+      repo = new GitRepository(workingDirPath, {project: atom.project, config: atom.config, confirm: atom.confirm})
       filePath = path.join(workingDirPath, 'a.txt')
       fs.writeFileSync(filePath, 'ch ch changes')
 
@@ -132,10 +145,10 @@ describe "Git", ->
         atom.workspace.open(filePath)
 
       runs ->
-        editor = atom.workspace.getActiveEditor()
+        editor = atom.workspace.getActiveTextEditor()
 
     it "displays a confirmation dialog by default", ->
-      spyOn(atom, 'confirm').andCallFake ({buttons}) -> buttons.OK()
+      atom.confirm.andCallFake ({buttons}) -> buttons.OK()
       atom.config.set('editor.confirmCheckoutHeadRevision', true)
 
       repo.checkoutHeadForEditor(editor)
@@ -143,7 +156,6 @@ describe "Git", ->
       expect(fs.readFileSync(filePath, 'utf8')).toBe ''
 
     it "does not display a dialog when confirmation is disabled", ->
-      spyOn(atom, 'confirm')
       atom.config.set('editor.confirmCheckoutHeadRevision', false)
 
       repo.checkoutHeadForEditor(editor)
@@ -153,7 +165,7 @@ describe "Git", ->
 
   describe ".destroy()", ->
     it "throws an exception when any method is called after it is called", ->
-      repo = new Git(require.resolve('./fixtures/git/master.git/HEAD'))
+      repo = new GitRepository(require.resolve('./fixtures/git/master.git/HEAD'))
       repo.destroy()
       expect(-> repo.getShortHead()).toThrow()
 
@@ -162,16 +174,16 @@ describe "Git", ->
 
     beforeEach ->
       workingDirectory = copyRepository()
-      repo = new Git(workingDirectory)
+      repo = new GitRepository(workingDirectory)
       filePath = path.join(workingDirectory, 'file.txt')
 
     it "trigger a status-changed event when the new status differs from the last cached one", ->
       statusHandler = jasmine.createSpy("statusHandler")
-      repo.on 'status-changed', statusHandler
+      repo.onDidChangeStatus statusHandler
       fs.writeFileSync(filePath, '')
       status = repo.getPathStatus(filePath)
       expect(statusHandler.callCount).toBe 1
-      expect(statusHandler.argsForCall[0][0..1]).toEqual [filePath, status]
+      expect(statusHandler.argsForCall[0][0]).toEqual {path: filePath, pathStatus: status}
 
       fs.writeFileSync(filePath, 'abc')
       status = repo.getPathStatus(filePath)
@@ -182,7 +194,7 @@ describe "Git", ->
 
     beforeEach ->
       workingDirectory = copyRepository()
-      repo = new Git(workingDirectory)
+      repo = new GitRepository(workingDirectory)
       directoryPath = path.join(workingDirectory, 'dir')
       filePath = path.join(directoryPath, 'b.txt')
 
@@ -193,11 +205,11 @@ describe "Git", ->
       expect(repo.isStatusModified(repo.getDirectoryStatus(directoryPath))).toBe true
 
   describe ".refreshStatus()", ->
-    [newPath, modifiedPath, cleanPath, originalModifiedPathText] = []
+    [newPath, modifiedPath, cleanPath, originalModifiedPathText, workingDirectory] = []
 
     beforeEach ->
       workingDirectory = copyRepository()
-      repo = new Git(workingDirectory)
+      repo = new GitRepository(workingDirectory)
       modifiedPath = path.join(workingDirectory, 'file.txt')
       newPath = path.join(workingDirectory, 'untracked.txt')
       cleanPath = path.join(workingDirectory, 'other.txt')
@@ -208,7 +220,7 @@ describe "Git", ->
     it "returns status information for all new and modified files", ->
       fs.writeFileSync(modifiedPath, 'making this path modified')
       statusHandler = jasmine.createSpy('statusHandler')
-      repo.on 'statuses-changed', statusHandler
+      repo.onDidChangeStatuses statusHandler
       repo.refreshStatus()
 
       waitsFor ->
@@ -219,11 +231,69 @@ describe "Git", ->
         expect(repo.isStatusNew(repo.getCachedPathStatus(newPath))).toBeTruthy()
         expect(repo.isStatusModified(repo.getCachedPathStatus(modifiedPath))).toBeTruthy()
 
+    it 'caches the proper statuses when a subdir is open', ->
+      subDir = path.join(workingDirectory, 'dir')
+      fs.mkdirSync(subDir)
+
+      filePath = path.join(subDir, 'b.txt')
+      fs.writeFileSync(filePath, '')
+
+      atom.project.setPaths([subDir])
+
+      waitsForPromise ->
+        atom.workspace.open('b.txt')
+
+      statusHandler = null
+      runs ->
+        repo = atom.project.getRepositories()[0]
+
+        statusHandler = jasmine.createSpy('statusHandler')
+        repo.onDidChangeStatuses statusHandler
+        repo.refreshStatus()
+
+      waitsFor ->
+        statusHandler.callCount > 0
+
+      runs ->
+        status = repo.getCachedPathStatus(filePath)
+        expect(repo.isStatusModified(status)).toBe false
+        expect(repo.isStatusNew(status)).toBe false
+
+    it 'caches the proper statuses when multiple project are open', ->
+      otherWorkingDirectory = copyRepository()
+
+      atom.project.setPaths([workingDirectory, otherWorkingDirectory])
+
+      waitsForPromise ->
+        atom.workspace.open('b.txt')
+
+      statusHandler = null
+      runs ->
+        repo = atom.project.getRepositories()[0]
+
+        statusHandler = jasmine.createSpy('statusHandler')
+        repo.onDidChangeStatuses statusHandler
+        repo.refreshStatus()
+
+      waitsFor ->
+        statusHandler.callCount > 0
+
+      runs ->
+        subDir = path.join(workingDirectory, 'dir')
+        fs.mkdirSync(subDir)
+
+        filePath = path.join(subDir, 'b.txt')
+        fs.writeFileSync(filePath, '')
+
+        status = repo.getCachedPathStatus(filePath)
+        expect(repo.isStatusModified(status)).toBe true
+        expect(repo.isStatusNew(status)).toBe false
+
   describe "buffer events", ->
     [editor] = []
 
     beforeEach ->
-      atom.project.setPath(copyRepository())
+      atom.project.setPaths([copyRepository()])
 
       waitsForPromise ->
         atom.workspace.open('other.txt').then (o) -> editor = o
@@ -232,19 +302,19 @@ describe "Git", ->
       editor.insertNewline()
 
       statusHandler = jasmine.createSpy('statusHandler')
-      atom.project.getRepo().on 'status-changed', statusHandler
+      atom.project.getRepositories()[0].onDidChangeStatus statusHandler
       editor.save()
       expect(statusHandler.callCount).toBe 1
-      expect(statusHandler).toHaveBeenCalledWith editor.getPath(), 256
+      expect(statusHandler).toHaveBeenCalledWith {path: editor.getPath(), pathStatus: 256}
 
     it "emits a status-changed event when a buffer is reloaded", ->
       fs.writeFileSync(editor.getPath(), 'changed')
 
       statusHandler = jasmine.createSpy('statusHandler')
-      atom.project.getRepo().on 'status-changed', statusHandler
+      atom.project.getRepositories()[0].onDidChangeStatus statusHandler
       editor.getBuffer().reload()
       expect(statusHandler.callCount).toBe 1
-      expect(statusHandler).toHaveBeenCalledWith editor.getPath(), 256
+      expect(statusHandler).toHaveBeenCalledWith {path: editor.getPath(), pathStatus: 256}
       editor.getBuffer().reload()
       expect(statusHandler.callCount).toBe 1
 
@@ -252,12 +322,16 @@ describe "Git", ->
       fs.writeFileSync(editor.getPath(), 'changed')
 
       statusHandler = jasmine.createSpy('statusHandler')
-      atom.project.getRepo().on 'status-changed', statusHandler
-      editor.getBuffer().emit 'path-changed'
+      atom.project.getRepositories()[0].onDidChangeStatus statusHandler
+      editor.getBuffer().emitter.emit 'did-change-path'
       expect(statusHandler.callCount).toBe 1
-      expect(statusHandler).toHaveBeenCalledWith editor.getPath(), 256
-      editor.getBuffer().emit 'path-changed'
+      expect(statusHandler).toHaveBeenCalledWith {path: editor.getPath(), pathStatus: 256}
+      editor.getBuffer().emitter.emit 'did-change-path'
       expect(statusHandler.callCount).toBe 1
+
+    it "stops listening to the buffer when the repository is destroyed (regression)", ->
+      atom.project.getRepositories()[0].destroy()
+      expect(-> editor.save()).not.toThrow()
 
   describe "when a project is deserialized", ->
     [buffer, project2] = []
@@ -266,13 +340,14 @@ describe "Git", ->
       project2?.destroy()
 
     it "subscribes to all the serialized buffers in the project", ->
-      atom.project.setPath(copyRepository())
+      atom.project.setPaths([copyRepository()])
 
       waitsForPromise ->
         atom.workspace.open('file.txt')
 
       runs ->
-        project2 = atom.project.testSerialization()
+        project2 = new Project({notificationManager: atom.notifications, packageManager: atom.packages, confirm: atom.confirm})
+        project2.deserialize(atom.project.serialize({isUnloading: false}))
         buffer = project2.getBuffers()[0]
 
       waitsFor ->
@@ -283,7 +358,7 @@ describe "Git", ->
         buffer.append('changes')
 
         statusHandler = jasmine.createSpy('statusHandler')
-        project2.getRepo().on 'status-changed', statusHandler
+        project2.getRepositories()[0].onDidChangeStatus statusHandler
         buffer.save()
         expect(statusHandler.callCount).toBe 1
-        expect(statusHandler).toHaveBeenCalledWith buffer.getPath(), 256
+        expect(statusHandler).toHaveBeenCalledWith {path: buffer.getPath(), pathStatus: 256}
